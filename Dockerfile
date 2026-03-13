@@ -26,22 +26,20 @@ RUN pip install --no-cache-dir \
     pytz>=2024.1 \
     weasyprint>=62.3 \
     python-dotenv>=1.0.1 \
-    sendgrid>=6.11.0
+    sendgrid>=6.11.0 \
+    anthropic>=0.25.0
 
-# Copy engine files
+# Copy all app files
 COPY astro_calc.py .
+COPY astro_alignments.py .
 COPY personalization.py .
 COPY calendar_generator.py .
 COPY generate_calendar.py .
 COPY app.py .
 
-# Copy Swiss Ephemeris data files (required for production astro calculations)
-# Download from: https://www.astro.com/ftp/swisseph/ephe/
-# Required: seas_18.se1, semo_18.se1, sepl_18.se1
-COPY ephe/ ./ephe/
-
 # Output directory for generated calendars
 RUN mkdir -p /tmp/calendars
+RUN mkdir -p /app/ephe
 
 # Expose port (Railway sets PORT env var automatically)
 EXPOSE 5000

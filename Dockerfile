@@ -21,7 +21,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir \
     flask>=3.0.3 \
     gunicorn>=22.0.0 \
-    pyswisseph>=2.10.3 \
     geopy>=2.4.1 \
     timezonefinder>=6.5.2 \
     pytz>=2024.1 \

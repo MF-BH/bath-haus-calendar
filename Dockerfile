@@ -7,8 +7,9 @@ RUN apt-get update && apt-get install -y \
     libharfbuzz0b \
     libffi-dev \
     libcairo2 \
-    libgdk-pixbuf2.0-0 \
+    libgdk-pixbuf-2.0-0 \
     shared-mime-info \
+    fonts-liberation \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -41,8 +42,6 @@ COPY app.py .
 RUN mkdir -p /tmp/calendars
 RUN mkdir -p /app/ephe
 
-# Expose port (Railway sets PORT env var automatically)
 EXPOSE 5000
 
-# Run with gunicorn in production
 CMD gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:app

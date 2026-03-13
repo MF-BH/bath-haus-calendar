@@ -14,10 +14,8 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-# Copy requirements first (for layer caching)
 COPY requirements.txt .
 
-# Install Python dependencies
 RUN pip install --no-cache-dir \
     flask>=3.0.3 \
     gunicorn>=22.0.0 \
@@ -29,7 +27,6 @@ RUN pip install --no-cache-dir \
     sendgrid>=6.11.0 \
     anthropic>=0.25.0
 
-# Copy all app files
 COPY astro_calc.py .
 COPY astro_alignments.py .
 COPY personalization.py .
@@ -37,10 +34,8 @@ COPY calendar_generator.py .
 COPY generate_calendar.py .
 COPY app.py .
 
-# Output directory for generated calendars
-RUN mkdir -p /tmp/calendars
-RUN mkdir -p /app/ephe
+RUN mkdir -p /tmp/calendars && mkdir -p /app/ephe
 
-EXPOSE 5000
+EXPOSE 8080
 
-CMD gunicorn --bind 0.0.0.0:$PORT --workers 2 --timeout 120 app:app
+CMD ["sh", "-c", "gunicorn --bind 0.0.0.0:${PORT:-8080} --workers 2 --timeout 120 app:app"]

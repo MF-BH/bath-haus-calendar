@@ -1,26 +1,19 @@
 """
 astro_calc.py
 ─────────────────────────────────────────────────────────────────────────────
-Astronomical + numerological calculation layer for the Sacred Lunar Calendar.
+Astronomical calculation layer for the Sacred Lunar Calendar engine.
 
-ACCURACY NOTES:
-────────────────
-• Sun sign/degree:    Meeus ch.25, accurate to ~0.01°  ✓ Production-ready
-• Moon sign/degree:   Meeus simplified, accurate to ~1-3°  ✓ Sign-level reliable
-• Lunar phase dates:  Meeus ch.49, accurate to ~minutes  ✓ Production-ready
-• Solar ingresses:    Meeus binary-search, accurate to ~5 min  ✓ Production-ready
-• Rising/Ascendant:   Requires correct UTC offset from client.
-                      Accurate to ~1° when utc_offset is provided.
-• Planet longitudes:  Rough (~5°). Set BACKEND='swisseph' for precision.
-• HD Type/Authority:  Heuristic from planet gate clusters. Set BACKEND='swisseph'
-                      and use a full Rave Chart for certified accuracy.
-• Gene Keys gates:    Uses the correct 64-gate I-Ching zodiac wheel.
-                      4 activations: Life Work, Evolution, Radiance, Purpose.
-• Numerology:         Pure arithmetic — 100% accurate.
+BACKEND SELECTION (set at top of file):
+  'swisseph' — production-grade, arc-second precision (requires pyswisseph)
+  'meeus'    — pure Python Meeus algorithms, ~1-2° accuracy, no dependencies
 
-TO UPGRADE TO SWISS EPHEMERIS:
+Switch to 'swisseph' in production:
   pip install pyswisseph
-  Set BACKEND = 'swisseph' below.
+  Download ephemeris files from https://www.astro.com/ftp/swisseph/ephe/
+  Set EPHE_PATH below to the directory containing those files.
+
+All times returned as UTC datetime objects.
+All angles in decimal degrees (0–360).
 ─────────────────────────────────────────────────────────────────────────────
 """
 
@@ -29,9 +22,27 @@ import datetime
 from dataclasses import dataclass
 from typing import Optional
 
-BACKEND = 'meeus'   # switch to 'swisseph' when pyswisseph is installed
+# ── Backend selection ─────────────────────────────────────────────────────────
 
-# ── Zodiac ────────────────────────────────────────────────────────────────────
+BACKEND = 'meeus'   # switch to 'swisseph' in production
+EPHE_PATH = '/usr/share/ephe'  # path to Swiss Ephemeris data files
+
+# Try to import swisseph; fall back gracefully
+_swe = None
+if BACKEND == 'swisseph':
+    try:
+        import swisseph as swe
+        swe.set_ephe_path(EPHE_PATH)
+        _swe = swe
+    except ImportError:
+        import warnings
+        warnings.warn(
+            "pyswisseph not installed — falling back to Meeus approximations.\n"
+            "Install with: pip install pyswisseph\n"
+            "Download ephemeris files from: https://www.astro.com/ftp/swisseph/ephe/"
+        )
+
+# ── Zodiac helpers ────────────────────────────────────────────────────────────
 
 SIGNS = [
     'Aries', 'Taurus', 'Gemini', 'Cancer', 'Leo', 'Virgo',
@@ -39,38 +50,21 @@ SIGNS = [
 ]
 SIGN_SYMBOLS = ['♈','♉','♊','♋','♌','♍','♎','♏','♐','♑','♒','♓']
 
-def longitude_to_sign(lon: float) -> tuple[str, float, str]:
+def longitude_to_sign(lon: float) -> tuple:
+    """Return (sign_name, degree_within_sign, symbol)."""
     lon = lon % 360
     idx = int(lon // 30)
-    return SIGNS[idx], lon % 30, SIGN_SYMBOLS[idx]
+    deg = lon % 30
+    return SIGNS[idx], deg, SIGN_SYMBOLS[idx]
 
 def sign_symbol(sign_name: str) -> str:
-    return SIGN_SYMBOLS[SIGNS.index(sign_name)]
+    idx = SIGNS.index(sign_name)
+    return SIGN_SYMBOLS[idx]
 
-# ── Gene Keys / Human Design gate wheel ──────────────────────────────────────
-# 64 I-Ching hexagram gates mapped around the tropical zodiac wheel.
-# Sector 0 = Aries 0°, each sector = 5.625° (360/64).
-# Source: Human Design System / Gene Keys (Ra Uru Hu / Richard Rudd)
-
-GK_GATE_WHEEL = [
-    25, 17, 21, 51, 42,  3, 27, 24,  2, 23,  8, 20, 16, 35, 45, 12,
-    15, 52, 39, 53, 62, 56, 31, 33,  7,  4, 29, 59, 40, 64, 47,  6,
-    46, 18, 48, 57, 32, 50, 28, 44,  1, 43, 14, 34,  9,  5, 26, 11,
-    10, 58, 38, 54, 61, 60, 41, 19, 13, 49, 30, 55, 37, 63, 22, 36,
-]
-
-def longitude_to_gate(lon: float) -> int:
-    """Convert ecliptic longitude to HD/GK gate number (1-64)."""
-    return GK_GATE_WHEEL[int((lon % 360) / 5.625)]
-
-def opposite_gate(gate: int) -> int:
-    """Return the gate directly opposite in the I-Ching wheel."""
-    idx = GK_GATE_WHEEL.index(gate)
-    return GK_GATE_WHEEL[(idx + 32) % 64]
-
-# ── Julian Day ────────────────────────────────────────────────────────────────
+# ── Julian Day helpers ────────────────────────────────────────────────────────
 
 def datetime_to_jd(dt: datetime.datetime) -> float:
+    """Convert UTC datetime to Julian Day Number."""
     a = (14 - dt.month) // 12
     y = dt.year + 4800 - a
     m = dt.month + 12 * a - 3
@@ -80,9 +74,10 @@ def datetime_to_jd(dt: datetime.datetime) -> float:
     return jdn + frac
 
 def jd_to_datetime(jd: float) -> datetime.datetime:
+    """Convert Julian Day Number to UTC datetime."""
     jd = jd + 0.5
-    z  = int(jd)
-    f  = jd - z
+    z = int(jd)
+    f = jd - z
     if z < 2299161:
         a = z
     else:
@@ -92,27 +87,131 @@ def jd_to_datetime(jd: float) -> datetime.datetime:
     c = int((b - 122.1) / 365.25)
     d = int(365.25 * c)
     e = int((b - d) / 30.6001)
-    day   = b - d - int(30.6001 * e)
+    day = b - d - int(30.6001 * e)
     month = e - 1 if e < 14 else e - 13
-    year  = c - 4716 if month > 2 else c - 4715
-    hour   = int(f * 24)
-    minute = int((f * 24 - hour) * 60)
-    second = int(((f * 24 - hour) * 60 - minute) * 60)
+    year = c - 4716 if month > 2 else c - 4715
+    frac_day = f
+    hour = int(frac_day * 24)
+    minute = int((frac_day * 24 - hour) * 60)
+    second = int(((frac_day * 24 - hour) * 60 - minute) * 60)
     return datetime.datetime(year, month, day, hour, minute, second,
                              tzinfo=datetime.timezone.utc)
+
+# ── Planet longitude — unified interface ──────────────────────────────────────
+
+# Swiss Ephemeris planet IDs
+_SWE_PLANETS = {
+    'sun':     0,
+    'moon':    1,
+    'mercury': 2,
+    'venus':   3,
+    'mars':    4,
+    'jupiter': 5,
+    'saturn':  6,
+    'uranus':  7,
+    'neptune': 8,
+    'pluto':   9,
+    'node':   11,  # mean north node
+}
+
+def get_planet_longitude(jd: float, planet: str) -> float:
+    """
+    Return ecliptic longitude for a planet at JD.
+    Uses Swiss Ephemeris if available, else Meeus approximation.
+    """
+    if _swe is not None:
+        planet_id = _SWE_PLANETS.get(planet)
+        if planet_id is not None:
+            result = _swe.calc_ut(jd, planet_id, _swe.FLG_SWIEPH | _swe.FLG_SPEED)
+            return result[0][0] % 360
+    # Fallback to Meeus
+    return _meeus_planet_longitude(jd, planet)
+
+
+def _meeus_planet_longitude(jd: float, planet: str) -> float:
+    """Meeus approximation for planet longitudes."""
+    T = (jd - 2451545.0) / 36525
+    if planet == 'sun':
+        return _sun_longitude(jd)
+    elif planet == 'moon':
+        return _approx_moon_longitude(jd)
+    elif planet == 'mercury':
+        L = 252.2509 + 149472.6746 * T
+        M = math.radians((168.6562 + 149472.5153 * T) % 360)
+        return (L + 23.4400 * math.sin(M)) % 360
+    elif planet == 'venus':
+        L = 181.9798 + 58517.8156 * T
+        M = math.radians((212.2529 + 58517.8039 * T) % 360)
+        return (L + 0.7758 * math.sin(M)) % 360
+    elif planet == 'mars':
+        L = 355.4330 + 19140.2993 * T
+        M = math.radians((19.3870 + 19140.2993 * T) % 360)
+        return (L + 10.6912 * math.sin(M)) % 360
+    elif planet == 'jupiter':
+        L = (34.351519 + 3034.905675 * T) % 360
+        M = math.radians((20.9 + 3034.9 * T) % 360)
+        return (L + 5.5549 * math.sin(M) + 0.1683 * math.sin(2*M)) % 360
+    elif planet == 'saturn':
+        L = (50.077444 + 1222.113777 * T) % 360
+        M = math.radians((317.02 + 1222.11 * T) % 360)
+        return (L + 6.3585 * math.sin(M) + 0.2204 * math.sin(2*M)) % 360
+    elif planet == 'node':
+        return (125.0445479 - 1934.1362608 * T) % 360
+    return 0.0
+
+
+def _sun_longitude(jd: float) -> float:
+    """Meeus Sun longitude, ch. 25."""
+    T = (jd - 2451545.0) / 36525
+    L0 = 280.46646 + 36000.76983 * T + 0.0003032 * T**2
+    M  = 357.52911 + 35999.05029 * T - 0.0001537 * T**2
+    M_r = math.radians(M % 360)
+    C = ((1.914602 - 0.004817 * T - 0.000014 * T**2) * math.sin(M_r)
+         + (0.019993 - 0.000101 * T) * math.sin(2 * M_r)
+         + 0.000289 * math.sin(3 * M_r))
+    sun_lon = (L0 + C) % 360
+    omega = math.radians(125.04 - 1934.136 * T)
+    return (sun_lon - 0.00569 - 0.00478 * math.sin(omega)) % 360
+
+
+def _approx_moon_longitude(jd: float) -> float:
+    """Meeus Moon longitude, simplified."""
+    T = (jd - 2451545.0) / 36525
+    L0 = 218.3164477 + 481267.88123421 * T
+    Mprime = 134.9633964 + 477198.8675055 * T
+    F  = 93.2720950 + 483202.0175233 * T
+    lon = L0 + 6.289 * math.sin(math.radians(Mprime))
+    lon -= 1.274 * math.sin(math.radians(2 * F - Mprime))
+    lon += 0.658 * math.sin(math.radians(2 * F))
+    lon -= 0.214 * math.sin(math.radians(2 * Mprime))
+    return lon % 360
+
 
 # ── Meeus lunar phase calculator ──────────────────────────────────────────────
 
 def _lunar_phase_jd(year: float, phase: int) -> float:
-    k      = round((year - 2000) * 12.3685) + phase * 0.25
-    T      = k / 1236.85
-    JDE    = (2451550.09766 + 29.530588861 * k + 0.00015437 * T**2
-              - 0.000000150 * T**3 + 0.00000000073 * T**4)
-    M      = math.radians(2.5534 + 29.10535670 * k - 0.0000014 * T**2)
-    Mprime = math.radians(201.5643 + 385.81693528 * k + 0.0107582 * T**2)
-    F      = math.radians(160.7108 + 390.67050284 * k - 0.0016118 * T**2)
-    Omega  = math.radians(124.7746 - 1.56375588 * k + 0.0020672 * T**2)
-
+    """
+    Return JD of a lunar phase near the given fractional year.
+    phase: 0=New, 1=First Quarter, 2=Full, 3=Last Quarter
+    Meeus, Astronomical Algorithms ch. 49
+    """
+    k = round((year - 2000) * 12.3685) + phase * 0.25
+    T = k / 1236.85
+    JDE = (2451550.09766
+           + 29.530588861 * k
+           + 0.00015437 * T**2
+           - 0.000000150 * T**3
+           + 0.00000000073 * T**4)
+    M = math.radians(2.5534 + 29.10535670 * k
+                     - 0.0000014 * T**2 - 0.00000011 * T**3)
+    Mprime = math.radians(201.5643 + 385.81693528 * k
+                          + 0.0107582 * T**2 + 0.00001238 * T**3
+                          - 0.000000058 * T**4)
+    F = math.radians(160.7108 + 390.67050284 * k
+                     - 0.0016118 * T**2 - 0.00000227 * T**3
+                     + 0.000000011 * T**4)
+    Omega = math.radians(124.7746 - 1.56375588 * k
+                         + 0.0020672 * T**2 + 0.00000215 * T**3)
     if phase == 0:
         corr = (-0.40720 * math.sin(Mprime) + 0.17241 * math.sin(M)
                 + 0.01608 * math.sin(2*Mprime) + 0.01039 * math.sin(2*F)
@@ -144,27 +243,31 @@ def _lunar_phase_jd(year: float, phase: int) -> float:
     return JDE + corr
 
 
-def get_lunar_phases_in_month(year: int, month: int) -> list[dict]:
-    frac_year   = year + (month - 1) / 12.0
+def get_lunar_phases_in_month(year: int, month: int) -> list:
+    frac_year = year + (month - 1) / 12.0
     phase_names = {0: 'New Moon', 1: 'First Quarter', 2: 'Full Moon', 3: 'Last Quarter'}
     phase_icons = {0: 'new-moon', 1: 'first-qtr', 2: 'full-moon', 3: 'last-qtr'}
-
     results = []
     for offset in range(-2, 5):
         for phase_idx in [0, 1, 2, 3]:
-            jd = _lunar_phase_jd(frac_year, phase_idx) + offset * 29.530588861
+            jd = _lunar_phase_jd(frac_year, phase_idx)
+            jd += offset * 29.530588861
             dt = jd_to_datetime(jd)
             if dt.year == year and dt.month == month:
-                moon_lon = _approx_moon_longitude(jd)
+                moon_lon = get_planet_longitude(jd, 'moon')
                 sign, deg, sym = longitude_to_sign(moon_lon)
                 results.append({
-                    'type': phase_names[phase_idx], 'icon': phase_icons[phase_idx],
-                    'datetime_utc': dt, 'day': dt.day,
-                    'moon_sign': sign, 'moon_degree': round(deg, 1),
-                    'moon_symbol': sym, 'time_str': dt.strftime('%-I:%M %p UTC'),
+                    'type': phase_names[phase_idx],
+                    'icon': phase_icons[phase_idx],
+                    'datetime_utc': dt,
+                    'day': dt.day,
+                    'moon_sign': sign,
+                    'moon_degree': round(deg, 1),
+                    'moon_symbol': sym,
+                    'time_str': dt.strftime('%-I:%M %p UTC'),
                 })
-
-    seen, unique = set(), []
+    seen = set()
+    unique = []
     for r in sorted(results, key=lambda x: x['datetime_utc']):
         key = (r['type'], r['day'])
         if key not in seen:
@@ -173,639 +276,729 @@ def get_lunar_phases_in_month(year: int, month: int) -> list[dict]:
     return unique
 
 
-def _approx_moon_longitude(jd: float) -> float:
-    T      = (jd - 2451545.0) / 36525
-    L0     = 218.3164477 + 481267.88123421 * T
-    Mprime = 134.9633964 + 477198.8675055 * T
-    F      = 93.2720950  + 483202.0175233 * T
-    lon    = (L0
-              + 6.289 * math.sin(math.radians(Mprime))
-              - 1.274 * math.sin(math.radians(2*F - Mprime))
-              + 0.658 * math.sin(math.radians(2*F))
-              - 0.214 * math.sin(math.radians(2*Mprime)))
-    return lon % 360
-
 # ── Solar ingresses ───────────────────────────────────────────────────────────
 
-def _sun_longitude(jd: float) -> float:
-    T   = (jd - 2451545.0) / 36525
-    L0  = 280.46646 + 36000.76983 * T + 0.0003032 * T**2
-    M   = 357.52911 + 35999.05029 * T - 0.0001537 * T**2
-    M_r = math.radians(M % 360)
-    C   = ((1.914602 - 0.004817*T - 0.000014*T**2) * math.sin(M_r)
-           + (0.019993 - 0.000101*T) * math.sin(2*M_r)
-           + 0.000289 * math.sin(3*M_r))
-    omega = math.radians(125.04 - 1934.136 * T)
-    return (L0 + C - 0.00569 - 0.00478 * math.sin(omega)) % 360
-
-
-def get_solar_ingresses_in_month(year: int, month: int) -> list[dict]:
+def get_solar_ingresses_in_month(year: int, month: int) -> list:
+    """Return Sun sign ingresses occurring in this month."""
     start = datetime.datetime(year, month, 1, tzinfo=datetime.timezone.utc)
-    end   = (datetime.datetime(year+1, 1, 1, tzinfo=datetime.timezone.utc)
-             if month == 12
-             else datetime.datetime(year, month+1, 1, tzinfo=datetime.timezone.utc))
-
+    end = (datetime.datetime(year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+           if month == 12
+           else datetime.datetime(year, month + 1, 1, tzinfo=datetime.timezone.utc))
     results = []
-    step    = datetime.timedelta(hours=6)
-    dt      = start
-    prev_idx = int(_sun_longitude(datetime_to_jd(dt)) // 30)
-
+    step = datetime.timedelta(hours=6)
+    dt = start
+    prev_sign_idx = int(get_planet_longitude(datetime_to_jd(dt), 'sun') // 30)
     while dt < end:
-        dt_next  = dt + step
-        lon      = _sun_longitude(datetime_to_jd(dt_next))
+        dt_next = dt + step
+        lon = get_planet_longitude(datetime_to_jd(dt_next), 'sun')
         sign_idx = int(lon // 30)
-        if sign_idx != prev_idx:
+        if sign_idx != prev_sign_idx:
             lo, hi = datetime_to_jd(dt), datetime_to_jd(dt_next)
             for _ in range(20):
                 mid = (lo + hi) / 2
-                (lo if int(_sun_longitude(mid) // 30) == prev_idx else hi)
-                if int(_sun_longitude(mid) // 30) == prev_idx:
+                lon_mid = get_planet_longitude(mid, 'sun')
+                if int(lon_mid // 30) == prev_sign_idx:
                     lo = mid
                 else:
                     hi = mid
             ingress_dt = jd_to_datetime((lo + hi) / 2)
             if ingress_dt.year == year and ingress_dt.month == month:
                 sign = SIGNS[sign_idx % 12]
-                if sign in ('Aries', 'Libra'):
-                    event_icon = 'equinox'
-                    event_type = 'Spring Equinox' if sign == 'Aries' else 'Autumn Equinox'
-                elif sign in ('Cancer', 'Capricorn'):
-                    event_icon = 'solstice'
-                    event_type = 'Summer Solstice' if sign == 'Cancer' else 'Winter Solstice'
-                else:
-                    event_icon = 'sun'
-                    event_type = f'Sun enters {sign}'
                 results.append({
-                    'type': event_type, 'icon': event_icon,
-                    'datetime_utc': ingress_dt, 'day': ingress_dt.day,
-                    'sign': sign, 'sign_symbol': SIGN_SYMBOLS[sign_idx % 12],
+                    'type': f'Sun enters {sign}',
+                    'icon': 'sun',
+                    'datetime_utc': ingress_dt,
+                    'day': ingress_dt.day,
+                    'sign': sign,
+                    'sign_symbol': SIGN_SYMBOLS[sign_idx % 12],
                     'time_str': ingress_dt.strftime('%-I:%M %p UTC'),
                 })
-            prev_idx = sign_idx
+            prev_sign_idx = sign_idx
         else:
-            prev_idx = sign_idx
+            prev_sign_idx = sign_idx
         dt = dt_next
-
     return results
 
-# ── Natal chart ───────────────────────────────────────────────────────────────
 
-@dataclass
-class NatalChart:
-    sun_sign:             str
-    sun_degree:           float
-    moon_sign:            str
-    moon_degree:          float
-    rising_sign:          str
-    rising_degree:        float
-    mercury_sign:         str
-    venus_sign:           str
-    mars_sign:            str
-    north_node_sign:      str
-    hd_type:              str
-    hd_authority:         str
-    hd_profile:           str
-    hd_incarnation_cross: str
-    life_path:            int
-    personal_year:        int
-    # Gene Keys — 4 main activation gates
-    gk_life_work:         int   # Conscious Sun gate (natal)
-    gk_evolution:         int   # Conscious Earth gate (opposite sun)
-    gk_radiance:          int   # Design Sun gate (~88 days before birth)
-    gk_purpose:           int   # Design Earth gate (opposite design sun)
+# ── Wheel of the Year ─────────────────────────────────────────────────────────
 
+WHEEL_EVENTS = [
+    {'name': 'Spring Equinox',  'icon': 'equinox',    'target_lon': 0.0,   'subtype': 'solar'},
+    {'name': 'Summer Solstice', 'icon': 'solstice',   'target_lon': 90.0,  'subtype': 'solar'},
+    {'name': 'Autumn Equinox',  'icon': 'equinox',    'target_lon': 180.0, 'subtype': 'solar'},
+    {'name': 'Winter Solstice', 'icon': 'solstice',   'target_lon': 270.0, 'subtype': 'solar'},
+    {'name': 'Imbolc',          'icon': 'imbolc',     'target_lon': 315.0, 'subtype': 'crossquarter'},
+    {'name': 'Beltane',         'icon': 'beltane',    'target_lon': 45.0,  'subtype': 'crossquarter'},
+    {'name': 'Lughnasadh',      'icon': 'lughnasadh', 'target_lon': 135.0, 'subtype': 'crossquarter'},
+    {'name': 'Samhain',         'icon': 'samhain',    'target_lon': 225.0, 'subtype': 'crossquarter'},
+]
 
-def calculate_natal_chart(
-    birth_date: datetime.date,
-    birth_time: datetime.time,
-    birth_lat:  float,
-    birth_lon:  float,
-    utc_offset: float = 0.0,   # LOCAL time UTC offset, e.g. -7.0 for PDT
-) -> NatalChart:
-    """
-    Calculate natal chart from birth data.
-
-    birth_time is LOCAL time at birthplace.
-    utc_offset is the UTC offset at time of birth (e.g. -7.0 for PDT, -5.0 for EST).
-    Without utc_offset the Rising sign will be wrong by several signs.
-    """
-    if BACKEND == 'swisseph':
-        return _natal_swisseph(birth_date, birth_time, birth_lat, birth_lon, utc_offset)
-
-    # Convert local → UTC
-    local_dt = datetime.datetime(birth_date.year, birth_date.month, birth_date.day,
-                                 birth_time.hour, birth_time.minute)
-    utc_dt   = (local_dt - datetime.timedelta(hours=utc_offset)).replace(
-                    tzinfo=datetime.timezone.utc)
-    jd = datetime_to_jd(utc_dt)
-
-    sun_lon     = _sun_longitude(jd)
-    moon_lon    = _approx_moon_longitude(jd)
-    rising_lon  = _approximate_rising(jd, birth_lat, birth_lon)
-    mercury_lon = _approx_planet_longitude(jd, 'mercury')
-    venus_lon   = _approx_planet_longitude(jd, 'venus')
-    mars_lon    = _approx_planet_longitude(jd, 'mars')
-
-    T        = (jd - 2451545.0) / 36525
-    node_lon = (125.0445479 - 1934.1362608 * T) % 360
-
-    sun_sign,     sun_deg,     _ = longitude_to_sign(sun_lon)
-    moon_sign,    moon_deg,    _ = longitude_to_sign(moon_lon)
-    rising_sign,  rising_deg,  _ = longitude_to_sign(rising_lon)
-    mercury_sign, _,           _ = longitude_to_sign(mercury_lon)
-    venus_sign,   _,           _ = longitude_to_sign(venus_lon)
-    mars_sign,    _,           _ = longitude_to_sign(mars_lon)
-    north_node_sign, _,        _ = longitude_to_sign(node_lon)
-
-    lp = _life_path(birth_date)
-    py = _personal_year(birth_date, datetime.date.today().year)
-
-    hd_type, hd_auth, hd_profile, hd_cross = _hd_approximate(
-        sun_lon, moon_lon, rising_lon, mercury_lon, venus_lon, mars_lon)
-
-    gk_lw, gk_ev, gk_rad, gk_pur = _gene_keys_profile(jd, sun_lon)
-
-    return NatalChart(
-        sun_sign=sun_sign,       sun_degree=round(sun_deg, 1),
-        moon_sign=moon_sign,     moon_degree=round(moon_deg, 1),
-        rising_sign=rising_sign, rising_degree=round(rising_deg, 1),
-        mercury_sign=mercury_sign, venus_sign=venus_sign, mars_sign=mars_sign,
-        north_node_sign=north_node_sign,
-        hd_type=hd_type, hd_authority=hd_auth,
-        hd_profile=hd_profile, hd_incarnation_cross=hd_cross,
-        life_path=lp, personal_year=py,
-        gk_life_work=gk_lw, gk_evolution=gk_ev,
-        gk_radiance=gk_rad, gk_purpose=gk_pur,
-    )
-
-
-
-# ── Human Design meaning tables ───────────────────────────────────────────────
-
-HD_TYPE_MEANINGS = {
-    'Projector': (
-        'Guide & Witness',
-        "You are not here to work in the traditional sense — you are here to guide, "
-        "direct, and see others with penetrating clarity. Your energy is focused and "
-        "selective. You are designed to wait for the right invitation before sharing "
-        "your gifts, and when that invitation comes from the correct people, your "
-        "wisdom lands with transformative precision. Success comes through recognition, "
-        "not initiation. Rest is not laziness — it is your sacred fuel."
-    ),
-    'Generator': (
-        'Builder & Responder',
-        "You carry the life force of the planet — you are the builders, the sustainers, "
-        "the ones whose energy powers the world when it is channelled into what truly "
-        "lights you up. You are designed to respond rather than initiate: wait for "
-        "life to present itself, then feel the gut's yes or no. When you follow your "
-        "Sacral response into work and relationships that genuinely enrol you, your "
-        "energy is near-limitless. Frustration is your signal to pause and re-align."
-    ),
-    'Manifesting Generator': (
-        'Multi-Passionate Responder',
-        "You carry the life force of the Generator with the initiating spark of the "
-        "Manifestor — you are the fastest movers in the Human Design system, designed "
-        "to skip steps and find shortcuts that others miss. Your power is in responding "
-        "and then moving — but you must inform others before acting to reduce the "
-        "resistance you'll otherwise meet. Frustration and anger are your signals. "
-        "Your path is not linear; it zigzags, and that is by design."
-    ),
-    'Manifestor': (
-        'Initiator & Trailblazer',
-        "You carry the rarest and most independent energy type — you are here to "
-        "initiate, to impact, to begin things that others then sustain. You do not "
-        "need to wait: you are designed to move when the impulse arises. But informing "
-        "others before you act is your key to reducing the resistance and control "
-        "that your energy field can trigger. Anger is your not-self signal. Peace "
-        "is your signature when you move in alignment."
-    ),
-    'Reflector': (
-        'Mirror of the Community',
-        "You are the rarest Human Design type — less than 1% of the population. "
-        "You have no defined centres, which means you are a pure mirror of the "
-        "environments and people around you. Your wellbeing is exquisitely sensitive "
-        "to the quality of your surroundings and relationships. You are designed to "
-        "wait 28 days — a full lunar cycle — before making major decisions, sampling "
-        "the decision across all the moon's transits. Disappointment is your "
-        "not-self signal. Surprise and delight are your natural state when aligned."
-    ),
+WHEEL_DESCRIPTIONS = {
+    'Spring Equinox':  'Equal day and night. The astrological new year. Emergence and initiation.',
+    'Summer Solstice': 'The longest day. Peak light. Fullness and outward expression.',
+    'Autumn Equinox':  'Equal day and night. Harvest and balance. Turning inward.',
+    'Winter Solstice': 'The longest night. Stillness and the return of light.',
+    'Imbolc':          'First stirrings of spring. Seeds beneath snow. Creative quickening.',
+    'Beltane':         'Peak of spring. Vitality and the fire of life. Full creative power.',
+    'Lughnasadh':      'First harvest. What has ripened. Gratitude for what was built.',
+    'Samhain':         'The thinning of the veil. Ancestors and completion. The dark half begins.',
 }
 
-HD_AUTHORITY_MEANINGS = {
-    'Sacral': (
-        'Gut Response',
-        "Your truth lives in the visceral, pre-verbal response of the Sacral centre — "
-        "the 'uh-huh' of yes and the 'unh-unh' of no that arises before the mind can "
-        "intercept it. Do not wait to think — feel the gut's response in real time. "
-        "Ask yourself yes/no questions. The body knows before the mind does."
-    ),
-    'Splenic': (
-        'Body Intuition',
-        "Your authority is the quietest and most immediate in the system — a subtle "
-        "whisper from the body's survival intelligence that speaks once and does not "
-        "repeat itself. It is the feeling of health, safety, and rightness in the "
-        "present moment. If it feels off in your body right now, it is. Trust the "
-        "first, quiet impression — your Splenic authority does not second-guess itself."
-    ),
-    'Emotional': (
-        'Emotional Wave',
-        "You are designed to wait through your emotional wave before making decisions. "
-        "Clarity does not come in the moment — it comes in time, as the wave moves "
-        "from high to low and back again. 'Never make a decision in the high or the low' "
-        "is your guiding principle. Wait until the emotional charge has settled and "
-        "you can feel a quiet inner knowing. There is no complete clarity — but you "
-        "will feel what is most true when the wave has passed through."
-    ),
-    'Ego': (
-        'Heart-Will',
-        "Your authority speaks through genuine desire and commitment from the heart. "
-        "Make decisions based on what you truly want — not obligation, not what others "
-        "expect of you. When you speak from the heart's will and make promises you "
-        "can genuinely keep, your energy is powerful and consistent. Notice what you "
-        "naturally reach toward when no one is watching."
-    ),
-    'Mental': (
-        'Outer Authority',
-        "Your clarity comes through talking — literally. You are designed to sound "
-        "your decision out loud to trusted people in trusted environments, and to "
-        "listen to what you hear yourself saying. You do not need advice from others; "
-        "you need witnesses to your own voice finding its truth. The environment and "
-        "the people you process with matter deeply to the quality of your decisions."
-    ),
-    'Self': (
-        'Identity Navigation',
-        "You make decisions correctly when you feel at home in yourself — when the "
-        "environment feels right, the timing feels right, and the people feel right. "
-        "Your Self authority navigates through a felt sense of identity: does this "
-        "feel like me? Ask yourself: do I love myself when I do this? Does this "
-        "feel like where I belong?"
-    ),
-    'Lunar': (
-        '28-Day Cycle',
-        "You are a Reflector, and your authority is the moon itself. For major "
-        "decisions, wait the full 28 days and observe how you feel about the decision "
-        "as the moon moves through all twelve gates of the Wheel. Speak the decision "
-        "to different people across the cycle. The answer that remains constant — "
-        "or deepens — across the full lunar month is your truth."
-    ),
-}
 
-HD_PROFILE_MEANINGS = {
-    '1/3': (
-        'Investigator / Martyr',
-        "You build security through deep research and foundational knowledge. "
-        "Your first line needs to know — thoroughly, exhaustively — before it can "
-        "move forward. Your third line learns through experimentation and trial; "
-        "what looks like failure to others is your curriculum. You bond-break "
-        "when things are no longer correct, and this is not fickleness — it is "
-        "how you gather the experiential wisdom you're here to offer."
-    ),
-    '2/4': (
-        'Hermit / Opportunist',
-        "You carry natural gifts you are often unaware of — talents that others "
-        "see in you long before you recognise them in yourself. Your second line "
-        "needs solitude to regenerate and to let the gifts percolate. Your fourth "
-        "line thrives in a network of close, trusted relationships — your "
-        "opportunities come through people who know and love you. You are called "
-        "out of your hermitage by the right invitations, and you recognise them "
-        "because they feel like recognition of who you already are."
-    ),
-    '3/5': (
-        'Martyr / Heretic',
-        "You are a living laboratory — you learn through direct, embodied "
-        "experience, through what works and what doesn't, and you become the "
-        "practical guide who has actually lived what they teach. Your fifth line "
-        "is projected upon: others see you as the one with the practical solution "
-        "to their problems, sometimes before you have offered anything. Hold your "
-        "reputation carefully — it precedes you."
-    ),
-    '4/6': (
-        'Opportunist / Role Model',
-        "Your life unfolds in three distinct phases. In your first 30 years, "
-        "you are experimenting, building your foundation of relationships. At "
-        "around 30, you move into a quieter period of observation — watching "
-        "from the roof, integrating what you've learned. After 50, you descend "
-        "as the living example, the Role Model who has embodied what they teach. "
-        "Your network of close relationships is your most powerful resource — "
-        "the right people open every door."
-    ),
-    '5/1': (
-        'Heretic / Investigator',
-        "You carry the projection field of the saviour — others will see you as "
-        "the one with the practical answer to their most pressing problems, often "
-        "from the first meeting. You need solid foundational knowledge to back up "
-        "the solutions your fifth line is expected to deliver. You are here to "
-        "universalise — to take what you know and offer it in a way that works "
-        "for many. Karma and reputation are your key themes."
-    ),
-    '6/2': (
-        'Role Model / Hermit',
-        "You are on the same three-phase journey as the 4/6, but with a deeper "
-        "need for solitude woven through each phase. In your first 30 years, you "
-        "are experimenting. From 30-50, you observe from above — often "
-        "misunderstood as detached or unavailable. After 50, you descend as the "
-        "embodied exemplar, the living proof that a life of integrity is possible. "
-        "You are deeply magnetic when you allow yourself to be seen in your natural state."
-    ),
-    '1/4': (
-        'Investigator / Opportunist',
-        "You build security through deep research — you need to know before you "
-        "can move — and your opportunities consistently come through your network "
-        "of close, trusted relationships. Knowledge and connection are your twin "
-        "foundations. The right information, in the hands of the right people "
-        "who know you, is your path."
-    ),
-    '4/1': (
-        'Opportunist / Investigator',
-        "Your primary channel is your network — close, trusted relationships "
-        "are the ground of your life. Your first line foundation needs to be "
-        "solid, and when it is, your fourth line can build bridges that carry "
-        "real weight. Security comes from knowing what you know, and from the "
-        "people you have invested in over time."
-    ),
-    '2/5': (
-        'Hermit / Heretic',
-        "Your natural, unhoned gifts become practical solutions for others — "
-        "your fifth line carries the projection of the practical guide, while "
-        "your second line needs real solitude to let those gifts regenerate and "
-        "deepen. You may be called into roles of leadership and problem-solving "
-        "that feel almost accidental to you. The key is discerning which "
-        "calls are genuinely aligned."
-    ),
-    '5/2': (
-        'Heretic / Hermit',
-        "You carry practical solutions from gifts you may not fully recognise "
-        "in yourself. Your fifth line is projected upon as the one who can fix "
-        "what is broken, while your second line needs significant solitude to "
-        "let those gifts operate naturally. Selective engagement is not "
-        "selfishness — it is how you protect the quality of what you offer."
-    ),
-    '3/6': (
-        'Martyr / Role Model',
-        "You learn through experience, through what sticks and what falls away, "
-        "and your three-phase life mirrors the 6/2 and 4/6 journey. Your early "
-        "years are a rich curriculum of experimentation. Over time, what you have "
-        "genuinely lived becomes the foundation of the wise, embodied guidance "
-        "you are here to offer. Experience is not a detour — it is the path."
-    ),
-    '6/3': (
-        'Role Model / Martyr',
-        "You are the observer who learns through experience — your sixth line "
-        "watches from above while your third line is in the laboratory below. "
-        "The three-phase life gives you time to integrate before you fully "
-        "embody the role model you're becoming. Your lived experience, including "
-        "the 'mistakes,' is exactly the credential that makes your wisdom real."
-    ),
-}
+def get_wheel_events_in_month(year: int, month: int) -> list:
+    start = datetime.datetime(year, month, 1, tzinfo=datetime.timezone.utc)
+    end = (datetime.datetime(year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+           if month == 12
+           else datetime.datetime(year, month + 1, 1, tzinfo=datetime.timezone.utc))
+    results = []
+    for event in WHEEL_EVENTS:
+        target = event['target_lon']
+        step = datetime.timedelta(hours=6)
+        cursor = start
+        prev_lon = get_planet_longitude(datetime_to_jd(cursor), 'sun')
+        while cursor < end:
+            cursor_next = cursor + step
+            lon = get_planet_longitude(datetime_to_jd(cursor_next), 'sun')
+            prev_dist = (prev_lon - target) % 360
+            curr_dist = (lon - target) % 360
+            if prev_dist > 180 and curr_dist <= 180:
+                lo_jd = datetime_to_jd(cursor)
+                hi_jd = datetime_to_jd(cursor_next)
+                for _ in range(24):
+                    mid_jd = (lo_jd + hi_jd) / 2
+                    mid_lon = get_planet_longitude(mid_jd, 'sun')
+                    if (mid_lon - target) % 360 > 180:
+                        lo_jd = mid_jd
+                    else:
+                        hi_jd = mid_jd
+                exact_dt = jd_to_datetime((lo_jd + hi_jd) / 2)
+                if exact_dt.year == year and exact_dt.month == month:
+                    results.append({
+                        'type':         event['name'],
+                        'icon':         event['icon'],
+                        'subtype':      event['subtype'],
+                        'datetime_utc': exact_dt,
+                        'day':          exact_dt.day,
+                        'description':  WHEEL_DESCRIPTIONS[event['name']],
+                        'time_str':     exact_dt.strftime('%-I:%M %p UTC'),
+                    })
+                break
+            prev_lon = lon
+            cursor = cursor_next
+    results.sort(key=lambda x: x['datetime_utc'])
+    return results
 
-HD_CROSS_MEANINGS = {
-    'Cross of Planning': (
-        'Community & Infrastructure',
-        "You carry one of the most common Incarnation Crosses on the planet — "
-        "you are part of the great wave of souls born to plan, organise, "
-        "and build the structures that communities need to function. Your "
-        "purpose is not dramatic or singular — it is essential. You are here "
-        "to contribute to the sustainable architecture of human life. "
-        "When you are building something that genuinely serves others, "
-        "you are in full alignment with your incarnation."
-    ),
-    'Cross of the Vessel of Love': (
-        'Universal Love',
-        "You are here to embody and transmit love in its most universal form — "
-        "not romantic love alone, but the love that underlies all life. "
-        "Your incarnation is a living question about what it means to love "
-        "without condition, to be a vessel through which the heart of the "
-        "cosmos moves. The quality of your love is your contribution to the world."
-    ),
-    'Cross of the Sphinx': (
-        'Orientation & Direction',
-        "You carry the cross of those who are oriented to the future and to "
-        "the deepest questions of direction and meaning. Your incarnation "
-        "asks: where are we going? You are here to question, to seek, "
-        "and to help others find their direction through life's mysteries. "
-        "The Sphinx guards the threshold — and so do you."
-    ),
-    'Cross of Penetration': (
-        'Depth & Revelation',
-        "You are here to penetrate the surface — to go deeply into life, "
-        "into ideas, into people, and to help others face what lies beneath "
-        "their shadows. Your incarnation is an invitation to go where others "
-        "hesitate, and to bring back what you find with honesty and precision."
-    ),
-    'Cross of Explanation': (
-        'Teaching & Communication',
-        "You are here to explain — to take complex truths and make them "
-        "accessible, to be the teacher who bridges the known and the unknown. "
-        "Your incarnation carries the gift of communication in service of "
-        "understanding. When you are teaching or explaining, you are most "
-        "fully yourself."
-    ),
-    'Cross of Confrontation': (
-        'Revealing & Witnessing',
-        "You are here to bring what is hidden into the light — to confront "
-        "what is unconscious, unspoken, or avoided, and to do so with the "
-        "precision and care of a skilled surgeon. Your incarnation is a "
-        "gift to those who are ready to see clearly."
-    ),
-    'Cross of the Four Ways': (
-        'Navigation & Crossroads',
-        "You stand at the crossroads — your incarnation carries the themes "
-        "of choice, direction, and the navigation of life's turning points. "
-        "You are here to help yourself and others find the right road at "
-        "the key junctions of life."
-    ),
-    'Cross of the Sleeping Phoenix': (
-        'Transformation & Rising',
-        "Your incarnation carries the theme of transformation — of dying to "
-        "what was in order to become what is next. Like the phoenix, your "
-        "deepest gifts emerge through the fires of change. You are here to "
-        "model regeneration."
-    ),
-}
 
-def get_hd_type_meaning(hd_type: str) -> tuple:
-    return HD_TYPE_MEANINGS.get(hd_type, (hd_type, ''))
+# ── Ascendant (Rising sign) ───────────────────────────────────────────────────
 
-def get_hd_authority_meaning(authority: str) -> tuple:
-    return HD_AUTHORITY_MEANINGS.get(authority, (authority, ''))
-
-def get_hd_profile_meaning(profile: str) -> tuple:
-    return HD_PROFILE_MEANINGS.get(profile, (profile, ''))
-
-def get_hd_cross_meaning(cross: str) -> tuple:
-    return HD_CROSS_MEANINGS.get(cross, (cross, ''))
-
-def _gene_keys_profile(jd_birth: float, sun_lon: float) -> tuple[int, int, int, int]:
+def get_ascendant(jd: float, lat: float, lon: float) -> float:
     """
-    4 Gene Keys activation gates.
-
-    Life's Work = Conscious Sun gate (natal sun longitude)
-    Evolution   = Conscious Earth gate (wheel-opposite of Life's Work)
-    Radiance    = Design Sun gate (sun ~88.736 days before birth)
-    Purpose     = Design Earth gate (wheel-opposite of Radiance)
+    Calculate Ascendant longitude.
+    Uses Swiss Ephemeris houses (Placidus) if available, else Meeus approximation.
     """
-    jd_design      = jd_birth - 88.736
-    sun_design_lon = _sun_longitude(jd_design)
-
-    gate_lw  = longitude_to_gate(sun_lon)
-    gate_ev  = opposite_gate(gate_lw)
-    gate_rad = longitude_to_gate(sun_design_lon)
-    gate_pur = opposite_gate(gate_rad)
-    return gate_lw, gate_ev, gate_rad, gate_pur
-
-
-def _hd_approximate(sun_lon, moon_lon, asc_lon,
-                     mercury_lon, venus_lon, mars_lon) -> tuple:
-    """
-    Approximate HD type from planet gate clusters.
-    NOTE: A certified HD chart requires all planets for both birth + design dates.
-    This heuristic is reasonable but not certified. Recommend pyswisseph upgrade.
-    """
-    SACRAL_GATES = {3, 5, 9, 14, 27, 29, 34, 59}
-    THROAT_GATES = {8, 12, 16, 20, 23, 31, 33, 35, 45, 56, 62}
-
-    active = {longitude_to_gate(l) for l in
-              [sun_lon, moon_lon, asc_lon, mercury_lon, venus_lon, mars_lon]}
-    sacral = len(active & SACRAL_GATES)
-    throat = len(active & THROAT_GATES)
-
-    if sacral >= 2:
-        hd_type   = 'Manifesting Generator' if throat >= 1 else 'Generator'
-        authority = 'Sacral'
-    elif sacral == 1 and throat >= 1:
-        hd_type   = 'Manifestor'
-        authority = 'Splenic' if any(g in {18,28,32,48,50,57} for g in active) else 'Ego'
-    else:
-        hd_type   = 'Projector'
-        authority = 'Splenic' if any(g in {18,28,32,48,50,57} for g in active) else 'Mental'
-
-    # Profile line from sun position within its gate
-    line = int(((sun_lon % 360) % 5.625) / (5.625 / 6)) + 1
-    line = max(1, min(6, line))
-    profile_map = {1:'1/3', 2:'2/4', 3:'3/5', 4:'4/6', 5:'5/1', 6:'6/2'}
-    profile = profile_map[line]
-
-    return hd_type, authority, profile, 'Cross of Planning'
+    if _swe is not None:
+        try:
+            cusps, ascmc = _swe.houses(jd, lat, lon, b'P')  # Placidus
+            return ascmc[0] % 360  # ascmc[0] is the Ascendant
+        except Exception:
+            pass
+    return _meeus_ascendant(jd, lat, lon)
 
 
-def _approximate_rising(jd: float, lat: float, lon: float) -> float:
-    T     = (jd - 2451545.0) / 36525
-    theta = 280.46061837 + 360.98564736629 * (jd - 2451545) + 0.000387933 * T**2
-    lst   = (theta + lon) % 360
-    eps   = math.radians(23.4393 - 0.013 * T)
+def _meeus_ascendant(jd: float, lat: float, lon: float) -> float:
+    """Meeus approximation for Ascendant."""
+    T = (jd - 2451545.0) / 36525
+    theta0 = 280.46061837 + 360.98564736629 * (jd - 2451545) + 0.000387933 * T**2
+    lst = (theta0 + lon) % 360
+    eps = math.radians(23.4393 - 0.013 * T)
     lst_r = math.radians(lst)
     lat_r = math.radians(lat)
-    asc   = math.atan2(math.cos(lst_r),
-                       -(math.sin(lst_r) * math.cos(eps)
-                         + math.tan(lat_r) * math.sin(eps)))
+    asc = math.atan2(math.cos(lst_r),
+                     -(math.sin(lst_r) * math.cos(eps)
+                       + math.tan(lat_r) * math.sin(eps)))
     return math.degrees(asc) % 360
 
 
-def _approx_planet_longitude(jd: float, planet: str) -> float:
-    T = (jd - 2451545.0) / 36525
-    if planet == 'mercury':
-        L = 252.2509 + 149472.6746 * T
-        M = math.radians((168.6562 + 149472.5153 * T) % 360)
-        return (L + 23.4400 * math.sin(M)) % 360
-    elif planet == 'venus':
-        L = 181.9798 + 58517.8156 * T
-        M = math.radians((212.2529 + 58517.8039 * T) % 360)
-        return (L + 0.7758 * math.sin(M)) % 360
-    elif planet == 'mars':
-        L = 355.4330 + 19140.2993 * T
-        M = math.radians((19.3870 + 19140.2993 * T) % 360)
-        return (L + 10.6912 * math.sin(M)) % 360
-    return 0.0
+# ── Human Design calculation ──────────────────────────────────────────────────
+#
+# Human Design is derived from two chart moments:
+#   Conscious (birth):    planetary positions at exact birth datetime
+#   Unconscious (design): planetary positions exactly 88.736° of Sun travel
+#                         before birth (~88 days prior)
+#
+# Each position maps to one of 64 gates (I Ching hexagrams) and one of
+# 6 lines within that gate. Gates are assigned to the 9 energy centers
+# via fixed channels. Defined centers determine Type and Authority.
+#
+# The gate/channel/center structure below is the public, factual architecture
+# of the Human Design system — not Ra Uru Hu's interpretive language.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Gate mapping: ecliptic longitude → gate number (1–64)
+# Gates are assigned in I Ching order around the wheel, starting at ~Capricorn 0°.
+# This is the standard, publicly documented HD mandala structure.
+# Reference: the HD mandala assigns gates to 5.625° segments of the ecliptic.
+# Starting point: Gate 41 at 0° Capricorn (Winter Solstice point).
+
+# Gate sequence around the zodiac wheel starting from 0° Capricorn:
+GATE_SEQUENCE = [
+    41, 19, 13, 49, 30, 55, 37, 63, 22, 36, 25, 17,
+    21, 51, 42, 3,  27, 24, 2,  23, 8,  20, 16, 35,
+    45, 12, 15, 52, 39, 53, 62, 56, 31, 33, 7,  4,
+    29, 59, 40, 64, 47, 6,  46, 18, 48, 57, 32, 50,
+    28, 44, 1,  43, 14, 34, 9,  5,  26, 11, 10, 58,
+    38, 54, 61, 60
+]
+
+def longitude_to_gate_line(lon: float) -> tuple:
+    """
+    Convert ecliptic longitude to (gate, line).
+    Each gate spans 360/64 = 5.625 degrees.
+    Each line spans 5.625/6 = 0.9375 degrees.
+    Starting point: Gate 41 at 270° (0° Capricorn).
+    Returns (gate_number, line_number) where line is 1–6.
+    """
+    # Offset so 270° (Capricorn 0°) = 0 in our gate wheel
+    adjusted = (lon - 270.0) % 360
+    gate_idx = int(adjusted / 5.625)
+    gate_idx = min(gate_idx, 63)  # safety clamp
+    gate = GATE_SEQUENCE[gate_idx]
+    # Line within gate (1–6)
+    pos_within_gate = adjusted - (gate_idx * 5.625)
+    line = int(pos_within_gate / 0.9375) + 1
+    line = min(max(line, 1), 6)
+    return gate, line
 
 
-# ── Swiss Ephemeris stub ──────────────────────────────────────────────────────
+# Channels: each connects two gates between two centers.
+# A channel is defined when BOTH gates are active (conscious or unconscious).
+# Structure: {(gate_a, gate_b): (center_a, center_b)}
+CHANNELS = {
+    (1, 8):   ('G', 'Throat'),
+    (2, 14):  ('G', 'Sacral'),
+    (3, 60):  ('Sacral', 'Root'),
+    (4, 63):  ('Ajna', 'Head'),
+    (5, 15):  ('Sacral', 'G'),
+    (6, 59):  ('Sacral', 'Emotional'),
+    (7, 31):  ('G', 'Throat'),
+    (9, 52):  ('Sacral', 'Root'),
+    (10, 20): ('G', 'Throat'),
+    (10, 34): ('G', 'Sacral'),
+    (10, 57): ('G', 'Spleen'),
+    (11, 56): ('Ajna', 'Throat'),
+    (12, 22): ('Throat', 'Emotional'),
+    (13, 33): ('G', 'Throat'),
+    (16, 48): ('Throat', 'Spleen'),
+    (17, 62): ('Ajna', 'Throat'),
+    (18, 58): ('Spleen', 'Root'),
+    (19, 49): ('Root', 'Emotional'),
+    (20, 34): ('Throat', 'Sacral'),
+    (20, 57): ('Throat', 'Spleen'),
+    (21, 45): ('Ego', 'Throat'),
+    (23, 43): ('Throat', 'Ajna'),
+    (24, 61): ('Ajna', 'Head'),
+    (25, 51): ('G', 'Ego'),
+    (26, 44): ('Ego', 'Spleen'),
+    (27, 50): ('Sacral', 'Spleen'),
+    (28, 38): ('Spleen', 'Root'),
+    (29, 46): ('Sacral', 'G'),
+    (30, 41): ('Emotional', 'Root'),
+    (32, 54): ('Spleen', 'Root'),
+    (35, 36): ('Throat', 'Emotional'),
+    (37, 40): ('Emotional', 'Ego'),
+    (39, 55): ('Root', 'Emotional'),
+    (42, 53): ('Sacral', 'Root'),
+    (47, 64): ('Ajna', 'Head'),
+}
 
-def _natal_swisseph(birth_date, birth_time, birth_lat, birth_lon, utc_offset):
-    try:
-        import swisseph as swe
-    except ImportError:
-        raise RuntimeError("pip install pyswisseph  then set BACKEND='swisseph'")
-    swe.set_ephe_path('/usr/share/ephe')
+# Which gates belong to which center
+CENTER_GATES = {
+    'Head':      {61, 63, 64},
+    'Ajna':      {4, 11, 17, 23, 24, 43, 47},
+    'Throat':    {8, 12, 16, 20, 23, 31, 33, 35, 45, 56, 62},
+    'G':         {1, 2, 7, 10, 13, 15, 25, 29, 46},
+    'Ego':       {21, 26, 40, 51},
+    'Sacral':    {3, 5, 9, 14, 27, 29, 34, 42, 59},
+    'Spleen':    {10, 16, 18, 26, 27, 28, 32, 33, 44, 48, 50, 57},
+    'Emotional': {6, 12, 19, 22, 30, 36, 37, 39, 41, 49, 55},
+    'Root':      {19, 28, 32, 38, 39, 41, 52, 53, 54, 58, 60},
+}
 
-    local_dt = datetime.datetime(birth_date.year, birth_date.month, birth_date.day,
-                                 birth_time.hour, birth_time.minute)
-    utc_dt   = local_dt - datetime.timedelta(hours=utc_offset)
-    jd = swe.julday(utc_dt.year, utc_dt.month, utc_dt.day,
-                    utc_dt.hour + utc_dt.minute / 60)
+MOTOR_CENTERS = {'Sacral', 'Emotional', 'Ego', 'Root'}
+THROAT_CONNECTED_MOTORS = {'Sacral', 'Emotional', 'Ego', 'Root'}
 
-    def plon(pid):
-        return swe.calc_ut(jd, pid)[0][0]
+def _get_design_jd(birth_jd: float) -> float:
+    """
+    Calculate the Design (unconscious) JD — the moment 88.736° of solar
+    travel before birth. We step backward until Sun has moved exactly that far.
+    """
+    target_lon = (get_planet_longitude(birth_jd, 'sun') - 88.736) % 360
+    # Approximate: 88.736° / 360° * 365.25 days ≈ 90 days
+    approx_jd = birth_jd - 90.0
+    # Binary search to find exact moment
+    lo_jd = birth_jd - 95.0
+    hi_jd = birth_jd - 85.0
+    for _ in range(40):
+        mid_jd = (lo_jd + hi_jd) / 2
+        mid_lon = get_planet_longitude(mid_jd, 'sun')
+        # Angular distance from target
+        dist = (mid_lon - target_lon) % 360
+        if dist < 180:
+            hi_jd = mid_jd
+        else:
+            lo_jd = mid_jd
+    return (lo_jd + hi_jd) / 2
 
-    sun_lon     = plon(swe.SUN)
-    moon_lon    = plon(swe.MOON)
-    mercury_lon = plon(swe.MERCURY)
-    venus_lon   = plon(swe.VENUS)
-    mars_lon    = plon(swe.MARS)
-    node_lon    = plon(swe.MEAN_NODE)
-    cusps, ascmc = swe.houses(jd, birth_lat, birth_lon, b'P')
-    rising_lon  = ascmc[0]
 
+def _collect_active_gates(jd: float) -> set:
+    """Return set of active gate numbers for a given JD (all 10 planets)."""
+    planets = ['sun', 'moon', 'mercury', 'venus', 'mars',
+               'jupiter', 'saturn', 'uranus', 'neptune', 'node']
+    gates = set()
+    for planet in planets:
+        try:
+            lon = get_planet_longitude(jd, planet)
+            gate, _ = longitude_to_gate_line(lon)
+            gates.add(gate)
+        except Exception:
+            pass
+    return gates
+
+
+def _get_defined_centers(active_gates: set) -> set:
+    """
+    Determine which centers are defined given a set of active gates.
+    A center is defined when a complete channel (both gates) is active.
+    """
+    defined = set()
+    for (g1, g2), (c1, c2) in CHANNELS.items():
+        if g1 in active_gates and g2 in active_gates:
+            defined.add(c1)
+            defined.add(c2)
+    return defined
+
+
+def _determine_type(defined_centers: set) -> str:
+    """
+    Determine HD Type from defined centers.
+    Rules (publicly documented):
+      Manifestor:          Throat defined + connected to a motor, Sacral NOT defined
+      Generator:           Sacral defined, Throat NOT connected to Sacral directly
+      Manifesting Generator: Sacral defined, Throat connected to Sacral (via channel)
+      Projector:           Sacral NOT defined, Throat NOT connected to motor
+      Reflector:           No centers defined
+    """
+    if not defined_centers:
+        return 'Reflector'
+
+    sacral_defined = 'Sacral' in defined_centers
+    throat_defined = 'Throat' in defined_centers
+
+    # Check if Throat is directly connected to Sacral via a channel
+    throat_sacral_connected = False
+    for (g1, g2), (c1, c2) in CHANNELS.items():
+        if set([c1, c2]) == {'Throat', 'Sacral'}:
+            throat_sacral_connected = True
+            break
+
+    # Check if Throat is connected to any motor
+    throat_motor_connected = any(
+        m in defined_centers and throat_defined
+        for m in MOTOR_CENTERS
+    )
+
+    if sacral_defined:
+        if throat_defined and throat_sacral_connected:
+            return 'Manifesting Generator'
+        return 'Generator'
+    elif throat_defined and throat_motor_connected:
+        return 'Manifestor'
+    else:
+        return 'Projector'
+
+
+def _determine_authority(defined_centers: set, hd_type: str) -> str:
+    """
+    Determine inner Authority from defined centers.
+    Priority order (publicly documented):
+    """
+    if hd_type == 'Reflector':
+        return 'Lunar'
+    if 'Emotional' in defined_centers:
+        return 'Emotional'
+    if 'Sacral' in defined_centers:
+        return 'Sacral'
+    if 'Spleen' in defined_centers:
+        return 'Splenic'
+    if 'Ego' in defined_centers:
+        return 'Ego'
+    if 'G' in defined_centers:
+        return 'Self'
+    return 'Mental'
+
+
+def _determine_profile(conscious_line: int, unconscious_line: int) -> str:
+    """Profile is the conscious/unconscious line combination of the Sun gate."""
+    return f"{conscious_line}/{unconscious_line}"
+
+
+def _determine_definition(defined_centers: set) -> str:
+    """
+    Single, Split, Triple Split, or Quadruple Split definition.
+    Simplified: count connected groups of defined centers.
+    """
+    if not defined_centers:
+        return 'No Definition'
+    # Build adjacency from channels
+    adj = {c: set() for c in defined_centers}
+    for (g1, g2), (c1, c2) in CHANNELS.items():
+        if c1 in defined_centers and c2 in defined_centers:
+            adj[c1].add(c2)
+            adj[c2].add(c1)
+    # Count connected components via BFS
+    visited = set()
+    components = 0
+    for start in defined_centers:
+        if start not in visited:
+            components += 1
+            queue = [start]
+            while queue:
+                node = queue.pop()
+                if node not in visited:
+                    visited.add(node)
+                    queue.extend(adj[node] - visited)
+    labels = {1: 'Single Definition', 2: 'Split Definition',
+              3: 'Triple Split', 4: 'Quadruple Split'}
+    return labels.get(components, f'{components}-way Split')
+
+
+def calculate_human_design(birth_jd: float) -> dict:
+    """
+    Calculate Human Design chart from birth Julian Day.
+
+    Returns dict with:
+      type, authority, profile, definition,
+      conscious_gates (list of (gate, line) tuples),
+      unconscious_gates (list of (gate, line) tuples),
+      defined_centers (set of center names),
+      active_gates (set of all gate numbers)
+    """
+    design_jd = _get_design_jd(birth_jd)
+
+    planets = ['sun', 'moon', 'mercury', 'venus', 'mars',
+               'jupiter', 'saturn', 'uranus', 'neptune', 'node']
+
+    conscious_gates = []
+    unconscious_gates = []
+    all_active_gates = set()
+
+    for planet in planets:
+        try:
+            c_lon = get_planet_longitude(birth_jd, planet)
+            u_lon = get_planet_longitude(design_jd, planet)
+            c_gate, c_line = longitude_to_gate_line(c_lon)
+            u_gate, u_line = longitude_to_gate_line(u_lon)
+            conscious_gates.append((planet, c_gate, c_line))
+            unconscious_gates.append((planet, u_gate, u_line))
+            all_active_gates.add(c_gate)
+            all_active_gates.add(u_gate)
+        except Exception:
+            pass
+
+    defined_centers = _get_defined_centers(all_active_gates)
+    hd_type = _determine_type(defined_centers)
+    authority = _determine_authority(defined_centers, hd_type)
+    definition = _determine_definition(defined_centers)
+
+    # Profile from conscious Sun gate line / unconscious Sun gate line
+    c_sun_line = next((line for planet, gate, line in conscious_gates
+                       if planet == 'sun'), 1)
+    u_sun_line = next((line for planet, gate, line in unconscious_gates
+                       if planet == 'sun'), 1)
+    profile = _determine_profile(c_sun_line, u_sun_line)
+
+    # Incarnation Cross: conscious Sun/Earth gates + unconscious Sun/Earth gates
+    c_sun_gate  = next((gate for p, gate, l in conscious_gates   if p == 'sun'),  0)
+    c_earth_gate = (GATE_SEQUENCE[(GATE_SEQUENCE.index(c_sun_gate) + 32) % 64]
+                    if c_sun_gate in GATE_SEQUENCE else 0)
+    u_sun_gate  = next((gate for p, gate, l in unconscious_gates  if p == 'sun'),  0)
+    u_earth_gate = (GATE_SEQUENCE[(GATE_SEQUENCE.index(u_sun_gate) + 32) % 64]
+                    if u_sun_gate in GATE_SEQUENCE else 0)
+    incarnation_cross = f"Gate {c_sun_gate}/{c_earth_gate} · {u_sun_gate}/{u_earth_gate}"
+
+    return {
+        'type':              hd_type,
+        'authority':         authority,
+        'profile':           profile,
+        'definition':        definition,
+        'incarnation_cross': incarnation_cross,
+        'defined_centers':   defined_centers,
+        'active_gates':      all_active_gates,
+        'conscious_gates':   conscious_gates,
+        'unconscious_gates': unconscious_gates,
+        'conscious_sun_gate':   c_sun_gate,
+        'unconscious_sun_gate': u_sun_gate,
+    }
+
+
+# ── Natal chart dataclass ─────────────────────────────────────────────────────
+
+@dataclass
+class NatalChart:
+    # Astrology
+    sun_sign: str
+    sun_degree: float
+    sun_longitude: float
+    moon_sign: str
+    moon_degree: float
+    rising_sign: str
+    rising_degree: float
+    mercury_sign: str
+    venus_sign: str
+    mars_sign: str
+    jupiter_sign: str
+    saturn_sign: str
+    north_node_sign: str
+    # Human Design
+    hd_type: str
+    hd_authority: str
+    hd_profile: str
+    hd_definition: str
+    hd_incarnation_cross: str
+    hd_defined_centers: set
+    hd_active_gates: set
+    hd_conscious_sun_gate: int
+    hd_unconscious_sun_gate: int
+    # Numerology
+    life_path: int
+    personal_year: int
+
+
+def calculate_natal_chart(birth_date: datetime.date,
+                           birth_time: datetime.time,
+                           birth_lat: float,
+                           birth_lon: float) -> NatalChart:
+    """
+    Calculate full natal chart from birth data.
+    Uses Swiss Ephemeris if installed, else Meeus approximations.
+    """
+    birth_dt = datetime.datetime(
+        birth_date.year, birth_date.month, birth_date.day,
+        birth_time.hour, birth_time.minute,
+        tzinfo=datetime.timezone.utc
+    )
+    jd = datetime_to_jd(birth_dt)
+
+    # Planetary positions
+    sun_lon     = get_planet_longitude(jd, 'sun')
+    moon_lon    = get_planet_longitude(jd, 'moon')
+    mercury_lon = get_planet_longitude(jd, 'mercury')
+    venus_lon   = get_planet_longitude(jd, 'venus')
+    mars_lon    = get_planet_longitude(jd, 'mars')
+    jupiter_lon = get_planet_longitude(jd, 'jupiter')
+    saturn_lon  = get_planet_longitude(jd, 'saturn')
+    node_lon    = get_planet_longitude(jd, 'node')
+
+    sun_sign,     sun_deg,     _ = longitude_to_sign(sun_lon)
+    moon_sign,    moon_deg,    _ = longitude_to_sign(moon_lon)
+    mercury_sign, _,           _ = longitude_to_sign(mercury_lon)
+    venus_sign,   _,           _ = longitude_to_sign(venus_lon)
+    mars_sign,    _,           _ = longitude_to_sign(mars_lon)
+    jupiter_sign, _,           _ = longitude_to_sign(jupiter_lon)
+    saturn_sign,  _,           _ = longitude_to_sign(saturn_lon)
+    node_sign,    _,           _ = longitude_to_sign(node_lon)
+
+    # Ascendant
+    rising_lon = get_ascendant(jd, birth_lat, birth_lon)
+    rising_sign, rising_deg, _ = longitude_to_sign(rising_lon)
+
+    # Human Design
+    hd = calculate_human_design(jd)
+
+    # Numerology
     lp = _life_path(birth_date)
     py = _personal_year(birth_date, datetime.date.today().year)
-    hd = _hd_approximate(sun_lon, moon_lon, rising_lon, mercury_lon, venus_lon, mars_lon)
-    gk = _gene_keys_profile(jd, sun_lon)
-
-    def si(lon): return longitude_to_sign(lon)
 
     return NatalChart(
-        sun_sign=si(sun_lon)[0],         sun_degree=round(si(sun_lon)[1], 1),
-        moon_sign=si(moon_lon)[0],       moon_degree=round(si(moon_lon)[1], 1),
-        rising_sign=si(rising_lon)[0],   rising_degree=round(si(rising_lon)[1], 1),
-        mercury_sign=si(mercury_lon)[0], venus_sign=si(venus_lon)[0],
-        mars_sign=si(mars_lon)[0],       north_node_sign=si(node_lon)[0],
-        hd_type=hd[0], hd_authority=hd[1], hd_profile=hd[2], hd_incarnation_cross=hd[3],
-        life_path=lp, personal_year=py,
-        gk_life_work=gk[0], gk_evolution=gk[1], gk_radiance=gk[2], gk_purpose=gk[3],
+        sun_sign=sun_sign,         sun_degree=round(sun_deg, 1),
+        sun_longitude=round(sun_lon, 4),
+        moon_sign=moon_sign,       moon_degree=round(moon_deg, 1),
+        rising_sign=rising_sign,   rising_degree=round(rising_deg, 1),
+        mercury_sign=mercury_sign,
+        venus_sign=venus_sign,
+        mars_sign=mars_sign,
+        jupiter_sign=jupiter_sign,
+        saturn_sign=saturn_sign,
+        north_node_sign=node_sign,
+        hd_type=hd['type'],
+        hd_authority=hd['authority'],
+        hd_profile=hd['profile'],
+        hd_definition=hd['definition'],
+        hd_incarnation_cross=hd['incarnation_cross'],
+        hd_defined_centers=hd['defined_centers'],
+        hd_active_gates=hd['active_gates'],
+        hd_conscious_sun_gate=hd['conscious_sun_gate'],
+        hd_unconscious_sun_gate=hd['unconscious_sun_gate'],
+        life_path=lp,
+        personal_year=py,
     )
+
+
+# ── Planetary aspects ─────────────────────────────────────────────────────────
+
+PLANETS_FOR_ASPECTS = ['sun', 'mercury', 'venus', 'mars', 'jupiter', 'saturn']
+PLANET_NAMES = {
+    'sun': 'Sun', 'moon': 'Moon', 'mercury': 'Mercury',
+    'venus': 'Venus', 'mars': 'Mars', 'jupiter': 'Jupiter', 'saturn': 'Saturn'
+}
+ASPECTS = {
+    'conjunction': (0,   8),
+    'sextile':     (60,  6),
+    'square':      (90,  7),
+    'trine':       (120, 8),
+    'opposition':  (180, 8),
+}
+
+def _angular_distance(lon1: float, lon2: float) -> float:
+    diff = abs(lon1 - lon2) % 360
+    return diff if diff <= 180 else 360 - diff
+
+def get_month_aspects(year: int, month: int) -> list:
+    start_dt = datetime.datetime(year, month, 1, tzinfo=datetime.timezone.utc)
+    end_dt = (datetime.datetime(year + 1, 1, 1, tzinfo=datetime.timezone.utc)
+              if month == 12
+              else datetime.datetime(year, month + 1, 1, tzinfo=datetime.timezone.utc))
+    start_jd = datetime_to_jd(start_dt)
+    days_in_month = (end_dt - start_dt).days
+    planets = PLANETS_FOR_ASPECTS
+    pairs = [(p1, p2) for i, p1 in enumerate(planets) for p2 in planets[i+1:]]
+    found = []
+    seen = set()
+    for p1, p2 in pairs:
+        for day in range(days_in_month):
+            jd = start_jd + day
+            jd_next = jd + 1
+            lon1 = get_planet_longitude(jd, p1)
+            lon2 = get_planet_longitude(jd, p2)
+            lon1_next = get_planet_longitude(jd_next, p1)
+            lon2_next = get_planet_longitude(jd_next, p2)
+            dist      = _angular_distance(lon1, lon2)
+            dist_next = _angular_distance(lon1_next, lon2_next)
+            for aspect_name, (target, orb) in ASPECTS.items():
+                if aspect_name == 'conjunction' and set([p1, p2]) == {'sun', 'moon'}:
+                    continue
+                in_orb = abs(dist - target) <= orb
+                in_orb_next = abs(dist_next - target) <= orb
+                is_exact = ((dist - target) * (dist_next - target) < 0
+                            or (in_orb and day == 0))
+                if is_exact or (in_orb and not in_orb_next):
+                    key = (p1, p2, aspect_name)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    orb_end = day
+                    for d2 in range(day, days_in_month):
+                        l1 = get_planet_longitude(start_jd + d2, p1)
+                        l2 = get_planet_longitude(start_jd + d2, p2)
+                        if abs(_angular_distance(l1, l2) - target) <= orb:
+                            orb_end = d2
+                        else:
+                            break
+                    exact_day = day + 1
+                    orb_start_date = datetime.date(year, month, day + 1)
+                    orb_end_date   = datetime.date(year, month, min(orb_end + 1, days_in_month))
+                    date_range = (orb_start_date.strftime('%b %-d')
+                                  if orb_start_date == orb_end_date
+                                  else f"{orb_start_date.strftime('%b %-d')}–{orb_end_date.strftime('%-d')}")
+                    p1_sign, p1_deg, _ = longitude_to_sign(get_planet_longitude(jd, p1))
+                    p2_sign, p2_deg, _ = longitude_to_sign(get_planet_longitude(jd, p2))
+                    found.append({
+                        'type':       aspect_name,
+                        'planet1':    p1,
+                        'planet2':    p2,
+                        'planets':    f"{PLANET_NAMES[p1]} · {PLANET_NAMES[p2]}",
+                        'exact_day':  exact_day,
+                        'date_range': date_range,
+                        'p1_sign':    p1_sign,
+                        'p2_sign':    p2_sign,
+                        'p1_degree':  round(p1_deg, 1),
+                        'p2_degree':  round(p2_deg, 1),
+                    })
+    found.sort(key=lambda x: x['exact_day'])
+    def significance(a):
+        outer = {'jupiter', 'saturn', 'mars'}
+        return -(int(a['planet1'] in outer) + int(a['planet2'] in outer))
+    found.sort(key=significance)
+    return found[:6]
+
+
+# ── Monthly sky events ────────────────────────────────────────────────────────
+
+def get_month_sky_events(year: int, month: int) -> dict:
+    """Master function: all sky events for a given month."""
+    lunar_phases    = get_lunar_phases_in_month(year, month)
+    solar_ingresses = get_solar_ingresses_in_month(year, month)
+    wheel_events    = get_wheel_events_in_month(year, month)
+    aspects         = get_month_aspects(year, month)
+
+    all_events = lunar_phases + solar_ingresses + wheel_events
+    all_events.sort(key=lambda x: x['datetime_utc'])
+
+    # Deduplicate by (day, type)
+    seen_keys = set()
+    deduped = []
+    for e in all_events:
+        key = (e['day'], e['type'])
+        if key not in seen_keys:
+            seen_keys.add(key)
+            deduped.append(e)
+    all_events = deduped
+
+    days = {}
+    for e in all_events:
+        d = e['day']
+        if d not in days:
+            days[d] = []
+        days[d].append(e)
+
+    return {
+        'year':            year,
+        'month':           month,
+        'events':          all_events,
+        'by_day':          days,
+        'lunar_phases':    lunar_phases,
+        'solar_ingresses': solar_ingresses,
+        'wheel_events':    wheel_events,
+        'aspects':         aspects,
+    }
 
 
 # ── Numerology ────────────────────────────────────────────────────────────────
 
 def _reduce(n: int, keep_master: bool = True) -> int:
-    """Reduce to single digit, preserving master numbers 11, 22, 33."""
     while n > 9 and not (keep_master and n in (11, 22, 33)):
         n = sum(int(d) for d in str(n))
     return n
 
 def _life_path(birth_date: datetime.date) -> int:
-    m = _reduce(birth_date.month, keep_master=False)
-    d = _reduce(birth_date.day,   keep_master=False)
-    y = _reduce(sum(int(c) for c in str(birth_date.year)), keep_master=False)
-    return _reduce(m + d + y)
+    total = (sum(int(d) for d in str(birth_date.year))
+             + _reduce(birth_date.month, False)
+             + _reduce(birth_date.day, False))
+    return _reduce(total)
 
 def _personal_year(birth_date: datetime.date, for_year: int) -> int:
-    m = _reduce(birth_date.month, keep_master=False)
-    d = _reduce(birth_date.day,   keep_master=False)
-    y = _reduce(sum(int(c) for c in str(for_year)), keep_master=False)
-    return _reduce(m + d + y)
+    total = (_reduce(birth_date.month, False)
+             + _reduce(birth_date.day, False)
+             + sum(int(d) for d in str(for_year)))
+    return _reduce(total)
 
 def personal_month(birth_date: datetime.date, for_year: int, for_month: int) -> int:
     py = _personal_year(birth_date, for_year)
     return _reduce(py + for_month)
 
 
-# ── Monthly sky events ────────────────────────────────────────────────────────
+# ── Eclipse detection ─────────────────────────────────────────────────────────
 
-def get_month_sky_events(year: int, month: int) -> dict:
-    """
-    Return all verified sky events for the month.
-    This is the authoritative source for what days are potent.
-    """
-    lunar    = get_lunar_phases_in_month(year, month)
-    ingress  = get_solar_ingresses_in_month(year, month)
-    all_evs  = sorted(lunar + ingress, key=lambda x: x['datetime_utc'])
-
-    days: dict[int, list] = {}
-    for e in all_evs:
-        days.setdefault(e['day'], []).append(e)
-
-    return {
-        'year': year, 'month': month,
-        'events': all_evs, 'by_day': days,
-        'lunar_phases': lunar, 'solar_ingresses': ingress,
-    }
+def check_eclipse(lunar_phase: dict) -> Optional[dict]:
+    """Placeholder — production: use Swiss Ephemeris eclipse functions."""
+    return None
